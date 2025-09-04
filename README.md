@@ -1,4 +1,4 @@
-# Nano Matter – HeatPipeTemp (DS18B20-only) with Battery Monitor
+# HeatPipeTemp - a centralised hot water supply monitor
 
 A compact Matter/Thread temperature accessory for **Arduino Nano Matter (MGM240S)** using a **DS18B20** sensor and **analog battery monitoring**. Designed to be battery-friendly while keeping HomeKit responsive.
 
