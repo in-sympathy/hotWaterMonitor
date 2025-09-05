@@ -14,7 +14,10 @@
           (no periodic/boot charging spam)
     • Battery sensing via A0 (R1=1M to pack+, R2=1M to GND, C1=100nF A0→GND)
     • Temp LED window 5s: ≤28°C → blue triple-bursts; >28°C → solid red
-    • Low batt orange triple-blink every 10s; charging purple slow blink; full green slow blink
+    • Battery LED shows only outside temp window (exclusive ownership):
+        - Charging → purple slow blink
+        - Full     → green slow blink
+        - Low      → orange triple-blink every 10s
     • Long press (≥6s) → white 6×, Matter.decommission()
 
   Wiring (battery sense):
@@ -145,7 +148,7 @@ const float VREF_3V3 = 3.254f;
 const float CAL_SLOPE    = 1.0007225f;
 const float CAL_OFFSET_V = 0.0f;
 
-// Battery thresholds (1S2P Li-ion, resting)
+// Battery thresholds (1S Li-ion, resting)
 const float LOW_BATT_V   = 3.55f;     // needs charge (tune to taste)
 const float FULL_BATT_V  = 4.18f;     // consider full near this
 
@@ -185,7 +188,7 @@ String pairingPIN;
 bool pairedCached     = false;
 bool threadConnCached = false;
 
-// Temperature blinker
+// Temperature blinker state
 enum BlinkState { BLINK_IDLE, BLINK_ON, BLINK_OFF, BLINK_GAP };
 BlinkState blinkState = BLINK_IDLE;
 uint8_t    blinkIndex = 0;             // 0..BLINK_COUNT-1
@@ -205,7 +208,10 @@ float    bootVStart = NAN;
 float    bootVMax   = NAN;
 uint32_t lastBootProbeMs = 0;
 
-// -------------------- LED helpers --------------------
+// -------------------- LED driver (exclusive ownership) --------------------
+enum LedColor { LED_OFF, LED_RED, LED_BLUE, LED_GREEN, LED_ORANGE, LED_PURPLE, LED_WHITE };
+LedColor currentColor = LED_OFF;
+
 inline void setBlueLed(bool on) {
   #if defined(HAVE_RGB_3) || defined(HAVE_RGB_2)
     #if BLUE_LED_ACTIVE_HIGH
@@ -250,32 +256,8 @@ inline void setSingleLed(bool on) {
     (void)on;
   #endif
 }
-inline void setWhiteLed(bool on) {
-  #if defined(HAVE_RGB_3)
-    setRedLed(on); setGreenLed(on); setBlueLed(on);
-  #elif defined(HAVE_RGB_2)
-    setRedLed(on); setBlueLed(on); // pseudo-white
-  #elif defined(HAVE_SINGLE_LED)
-    setSingleLed(on);
-  #endif
-}
-inline void setPurpleLed(bool on) { // red + blue
-  #if defined(HAVE_RGB_3) || defined(HAVE_RGB_2)
-    setRedLed(on); setBlueLed(on);
-  #elif defined(HAVE_SINGLE_LED)
-    setSingleLed(on);
-  #endif
-}
-inline void setOrangeLed(bool on) { // red + (some green)
-  #if defined(HAVE_RGB_3)
-    setRedLed(on); setGreenLed(on);
-  #elif defined(HAVE_RGB_2)
-    setRedLed(on); // pseudo-orange
-  #elif defined(HAVE_SINGLE_LED)
-    setSingleLed(on);
-  #endif
-}
-void ledsOff() {
+
+void ledsAllOff() {
   #if defined(HAVE_RGB_3)
     setRedLed(false); setGreenLed(false); setBlueLed(false);
   #elif defined(HAVE_RGB_2)
@@ -285,82 +267,101 @@ void ledsOff() {
   #endif
 }
 
-// -------------------- Temperature LED blinker (5s window) --------------------
-void updateTempBlinker(uint32_t ms) {
+void setColor(LedColor c) {
+  if (c == currentColor) return;
+  // turn everything off first to avoid color mixing
+  ledsAllOff();
+
+  switch (c) {
+    case LED_RED:     setRedLed(true); break;
+    case LED_BLUE:    setBlueLed(true); break;
+    case LED_GREEN:   setGreenLed(true); break;
+    case LED_ORANGE:
+      #if defined(HAVE_RGB_3)
+        setRedLed(true); setGreenLed(true);
+      #elif defined(HAVE_RGB_2)
+        setRedLed(true); // pseudo-orange
+      #elif defined(HAVE_SINGLE_LED)
+        setSingleLed(true);
+      #endif
+      break;
+    case LED_PURPLE:
+      #if defined(HAVE_RGB_3) || defined(HAVE_RGB_2)
+        setRedLed(true); setBlueLed(true);
+      #elif defined(HAVE_SINGLE_LED)
+        setSingleLed(true);
+      #endif
+      break;
+    case LED_WHITE:
+      #if defined(HAVE_RGB_3)
+        setRedLed(true); setGreenLed(true); setBlueLed(true);
+      #elif defined(HAVE_RGB_2)
+        setRedLed(true); setBlueLed(true);
+      #elif defined(HAVE_SINGLE_LED)
+        setSingleLed(true);
+      #endif
+      break;
+    case LED_OFF:
+    default:
+      break;
+  }
+  currentColor = c;
+}
+
+// -------------------- Temperature LED (owner only during window) --------------------
+LedColor computeTempColor(uint32_t ms) {
   if ((int32_t)(ms - indicateUntilMs) > 0) {
-    // window over; keep battery overlays if any
-    if (!lowBattery && chargeState != CHG_CHARGING && chargeState != CHG_FULL) {
-      ledsOff();
-    }
+    // window over
     blinkState = BLINK_IDLE;
-    return;
+    return LED_OFF;
   }
 
-  // Above threshold → solid RED (during indicate window)
+  // Above threshold → solid RED during the window
   if (!isnan(HeatPipeTempC) && HeatPipeTempC > TEMP_THRESHOLD_C) {
-    #if defined(HAVE_RGB_3) || defined(HAVE_RGB_2)
-      setBlueLed(false);
-      setRedLed(true);
-    #elif defined(HAVE_SINGLE_LED)
-      setSingleLed(true);
-    #endif
-    blinkState = BLINK_IDLE;
-    return;
+    return LED_RED;
   }
 
   // ≤ threshold → repeating smooth 3-blink BLUE burst
   switch (blinkState) {
     case BLINK_IDLE:
-      #if defined(HAVE_RGB_3) || defined(HAVE_RGB_2)
-        setRedLed(false);
-        setBlueLed(true);
-      #elif defined(HAVE_SINGLE_LED)
-        setSingleLed(true);
-      #endif
       blinkIndex = 0;
       blinkState = BLINK_ON;
       nextBlinkTransitionMs = ms + BLINK_ON_MS;
-      break;
+      return LED_BLUE;
 
     case BLINK_ON:
       if ((int32_t)(ms - nextBlinkTransitionMs) >= 0) {
-        #if defined(HAVE_RGB_3) || defined(HAVE_RGB_2)
-          setBlueLed(false);
-        #elif defined(HAVE_SINGLE_LED)
-          setSingleLed(false);
-        #endif
         blinkState = BLINK_OFF;
         nextBlinkTransitionMs = ms + BLINK_OFF_MS;
+        return LED_OFF;
       }
-      break;
+      return LED_BLUE;
 
     case BLINK_OFF:
       if ((int32_t)(ms - nextBlinkTransitionMs) >= 0) {
         blinkIndex++;
         if (blinkIndex < BLINK_COUNT) {
-          #if defined(HAVE_RGB_3) || defined(HAVE_RGB_2)
-            setBlueLed(true);
-          #elif defined(HAVE_SINGLE_LED)
-            setSingleLed(true);
-          #endif
           blinkState = BLINK_ON;
           nextBlinkTransitionMs = ms + BLINK_ON_MS;
+          return LED_BLUE;
         } else {
           blinkState = BLINK_GAP;
           nextBlinkTransitionMs = ms + BURST_GAP_MS;
+          return LED_OFF;
         }
       }
-      break;
+      return LED_OFF;
 
     case BLINK_GAP:
       if ((int32_t)(ms - nextBlinkTransitionMs) >= 0) {
         blinkState = BLINK_IDLE; // next burst
       }
-      break;
+      return LED_OFF;
   }
+  return LED_OFF;
 }
 
-// -------------------- Battery LED overlay --------------------
+// -------------------- Battery patterns (owner only outside window) --------------------
 // Low battery: quick orange triple-blink every 10 s
 const uint32_t LOW_ALERT_PERIOD_MS = 10000;
 const uint16_t LOW_ALERT_ON_MS     = 120;
@@ -375,58 +376,65 @@ uint32_t lowAlertNextEdgeMs   = 0;
 bool     chgBlinkOn           = false;
 uint32_t chgBlinkNextEdgeMs   = 0;
 
-// Full: green slow blink (on 300ms / off 1200ms) to allow temp LED window
+// Full: green slow blink (on 300ms / off 1200ms)
 bool     fullBlinkOn          = false;
 uint32_t fullBlinkNextEdgeMs  = 0;
 
-void updateBatteryLED(uint32_t ms) {
-  // LOW BATTERY pattern
+LedColor computeBatteryColor(uint32_t ms) {
+  // Priority: CHARGING → FULL → LOW → OFF
+
+  // CHARGING → purple slow blink
+  if (chargeState == CHG_CHARGING) {
+    if ((int32_t)(ms - chgBlinkNextEdgeMs) >= 0) {
+      chgBlinkOn = !chgBlinkOn;
+      chgBlinkNextEdgeMs = ms + (chgBlinkOn ? 400 : 600);
+    }
+    return chgBlinkOn ? LED_PURPLE : LED_OFF;
+  }
+
+  // FULL → green slow blink
+  if (chargeState == CHG_FULL) {
+    if ((int32_t)(ms - fullBlinkNextEdgeMs) >= 0) {
+      fullBlinkOn = !fullBlinkOn;
+      fullBlinkNextEdgeMs = ms + (fullBlinkOn ? 300 : 1200);
+    }
+    return fullBlinkOn ? LED_GREEN : LED_OFF;
+  }
+
+  // LOW → orange triple-blink every 10s
   if (lowBattery) {
     if ((int32_t)(ms - lowAlertCycleStartMs) >= (int32_t)LOW_ALERT_PERIOD_MS) {
       lowAlertCycleStartMs = ms;
       lowAlertPulseIndex = 0;
       lowAlertActivePulse = true;
       lowAlertNextEdgeMs = ms + LOW_ALERT_ON_MS;
-      setOrangeLed(true);
-    } else if (lowAlertActivePulse) {
+      return LED_ORANGE;
+    }
+    if (lowAlertActivePulse) {
       if ((int32_t)(ms - lowAlertNextEdgeMs) >= 0) {
-        if ( (lowAlertPulseIndex & 1) == 0 ) {
-          setOrangeLed(false);
+        if ((lowAlertPulseIndex & 1) == 0) {
+          // OFF edge
           lowAlertNextEdgeMs = ms + LOW_ALERT_OFF_MS;
+          lowAlertPulseIndex++;
+          return LED_OFF;
         } else {
-          setOrangeLed(true);
+          // ON edge
           lowAlertNextEdgeMs = ms + LOW_ALERT_ON_MS;
-        }
-        lowAlertPulseIndex++;
-        if (lowAlertPulseIndex >= LOW_ALERT_PULSES * 2) {
-          lowAlertActivePulse = false;
-          setOrangeLed(false);
+          lowAlertPulseIndex++;
+          if (lowAlertPulseIndex >= LOW_ALERT_PULSES * 2) {
+            lowAlertActivePulse = false;
+          }
+          return LED_ORANGE;
         }
       }
+      // Hold current phase
+      return ((lowAlertPulseIndex & 1) == 0) ? LED_ORANGE : LED_OFF;
     }
+    return LED_OFF;
   }
 
-  // CHARGING pattern (purple slow blink)
-  if (chargeState == CHG_CHARGING) {
-    if ((int32_t)(ms - chgBlinkNextEdgeMs) >= 0) {
-      chgBlinkOn = !chgBlinkOn;
-      setPurpleLed(chgBlinkOn);
-      chgBlinkNextEdgeMs = ms + (chgBlinkOn ? 400 : 600);
-    }
-  } else {
-    setPurpleLed(false);
-  }
-
-  // FULL pattern (green slow blink)
-  if (chargeState == CHG_FULL) {
-    if ((int32_t)(ms - fullBlinkNextEdgeMs) >= 0) {
-      fullBlinkOn = !fullBlinkOn;
-      setGreenLed(fullBlinkOn);
-      fullBlinkNextEdgeMs = ms + (fullBlinkOn ? 300 : 1200);
-    }
-  } else {
-    setGreenLed(false);
-  }
+  // Otherwise OFF
+  return LED_OFF;
 }
 
 // -------------------- Pairing / Buttons --------------------
@@ -453,8 +461,7 @@ static String groupManualOneLine(const String &raw) {
 }
 
 static void printFramedOneLine(const String &line) {
-  // Build a simple box around the line: +---...---+
-  const size_t inner = line.length() + 2; // spaces padding
+  const size_t inner = line.length() + 2; // spaces inside
   String top("+");    for (size_t i=0;i<inner;i++) top += "-"; top += "+";
   String mid("| ");   mid += line; mid += " |";
   String bot("+");    for (size_t i=0;i<inner;i++) bot += "-"; bot += "+";
@@ -472,7 +479,7 @@ void printPairingInfo() {
   Serial.print(F("Commissioned: ")); Serial.println(Matter.isDeviceCommissioned() ? F("yes") : F("no"));
   Serial.print(F("Thread link:  ")); Serial.println(Matter.isDeviceThreadConnected() ? F("connected") : F("not connected"));
   Serial.println(F("Manual pairing code:"));
-  printFramedOneLine(grouped);    // <-- ONE LINE in a frame
+  printFramedOneLine(grouped);    // ONE LINE in a frame
   Serial.println(F("==========================="));
 }
 
@@ -483,9 +490,9 @@ void printDecommissionNotice() {
 
 void doQuickWhiteBlinkConfirm() {
   for (uint8_t i = 0; i < QUICK_BLINK_COUNT; ++i) {
-    setWhiteLed(true);
+    setColor(LED_WHITE);
     delay(QUICK_BLINK_ON_MS);
-    setWhiteLed(false);
+    setColor(LED_OFF);
     delay(QUICK_BLINK_OFF_MS);
   }
 }
@@ -557,7 +564,7 @@ float readPackVoltage() {
 }
 
 uint8_t estimatePercent(float v) {
-  // Simple 1S2P Li-ion mapping (resting): 3.30V→0%, 4.20V→100%
+  // Simple 1S Li-ion mapping (resting): 3.30V→0%, 4.20V→100%
   const float V_MIN = 3.30f;
   const float V_MAX = 4.20f;
   float p = (v - V_MIN) * 100.0f / (V_MAX - V_MIN);
@@ -811,11 +818,16 @@ void loop() {
     publishIfNeeded();
   }
 
-  // LED indication (temperature window)
-  updateTempBlinker(ms);
-
-  // Battery overlay (low / charging / full)
-  updateBatteryLED(ms);
+  // Decide who owns the LED right now:
+  LedColor desired = LED_OFF;
+  if ((int32_t)(ms - indicateUntilMs) <= 0) {
+    // Temperature window owns the LED
+    desired = computeTempColor(ms);
+  } else {
+    // Battery status owns the LED
+    desired = computeBatteryColor(ms);
+  }
+  setColor(desired);
 
   // Keep loop snappy so Thread/Matter stays serviced
   delay(3);
