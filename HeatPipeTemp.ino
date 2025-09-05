@@ -145,7 +145,7 @@ const float VREF_3V3 = 3.254f;
 const float CAL_SLOPE    = 1.0007225f;
 const float CAL_OFFSET_V = 0.0f;
 
-// Battery thresholds (1S Li-ion, resting)
+// Battery thresholds (1S2P Li-ion, resting)
 const float LOW_BATT_V   = 3.55f;     // needs charge (tune to taste)
 const float FULL_BATT_V  = 4.18f;     // consider full near this
 
@@ -557,7 +557,7 @@ float readPackVoltage() {
 }
 
 uint8_t estimatePercent(float v) {
-  // Simple 1S Li-ion mapping (resting): 3.30V→0%, 4.20V→100%
+  // Simple 1S2P Li-ion mapping (resting): 3.30V→0%, 4.20V→100%
   const float V_MIN = 3.30f;
   const float V_MAX = 4.20f;
   float p = (v - V_MIN) * 100.0f / (V_MAX - V_MIN);
@@ -684,7 +684,7 @@ void readSensorOnce() {
   else { Serial.print(HeatPipeTempC, 2); Serial.println(F(" C")); }
 
   uint8_t pct = estimatePercent(vbatt);
-  Serial.print(F("Battery (1S pack): "));
+  Serial.print(F("Battery (1S2P pack): "));
   Serial.print(vbatt, 3);
   Serial.print(F(" V  ("));
   Serial.print(pct);
