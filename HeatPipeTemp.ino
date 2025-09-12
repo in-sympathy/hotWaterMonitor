@@ -21,6 +21,16 @@
 #include <Matter.h>
 #include <math.h>
 
+// ---- DallasTemperature portability: some forks only define DEVICE_DISCONNECTED
+#ifndef DEVICE_DISCONNECTED_C
+  #ifdef DEVICE_DISCONNECTED
+    #define DEVICE_DISCONNECTED_C DEVICE_DISCONNECTED
+  #else
+    #define DEVICE_DISCONNECTED_C (-127.0f)
+  #endif
+#endif
+// --------------------------------------------------------
+
 #if !defined(__has_include)
   #define __has_include(x) 0
 #endif
@@ -135,6 +145,7 @@ const float CAL_OFFSET_V = 0.000f;    // leave as-is
 OneWire oneWire(DS18B20_PIN);
 DallasTemperature HeatPipeTemp(&oneWire);  // requested name
 float HeatPipeTempC = NAN;
+bool ds18b20Present = false;               // presence flag
 
 // -------------------- Matter --------------------
 #ifdef HAS_MATTER_TEMP
@@ -246,6 +257,14 @@ float readPackVoltage() {
   float v_pack = readPackVoltageRawIdeal();
   v_pack = v_pack * CAL_SLOPE + CAL_OFFSET_V;
   return v_pack;
+}
+
+// -------------------- DS18B20 helpers --------------------
+// Portable helper: avoid isConversionComplete() (not present in some forks)
+static float readTempOnceWithTimeout(uint16_t extraWaitMs) {
+  HeatPipeTemp.requestTemperatures();            // may block briefly on some libs
+  delay(DS18B20_CONV_MS + extraWaitMs);          // ensure conversion window elapsed
+  return HeatPipeTemp.getTempCByIndex(0);
 }
 
 // -------------------- Temperature LED (only during indicate window) --------------------
@@ -422,13 +441,16 @@ bool publishIfNeeded() {
 }
 
 void readSensorOnce() {
-  HeatPipeTemp.requestTemperatures();
-  // Short cooperative wait for DS18B20 conversion
-  uint32_t t0 = millis();
-  while ((uint32_t)(millis() - t0) < DS18B20_CONV_MS) { delay(2); }
+  float t = readTempOnceWithTimeout(60);  // ~160 ms total budget
 
-  float t = HeatPipeTemp.getTempCByIndex(0);
-  if (t > -80 && t < 150) HeatPipeTempC = t;
+  // Retry once if disconnected (-127°C) or first-read default (85°C) or out of sane range
+  if (t == DEVICE_DISCONNECTED_C || fabsf(t - 85.0f) < 0.01f || t < -80.0f || t > 150.0f) {
+    t = readTempOnceWithTimeout(200);     // give it more time
+  }
+
+  if (t > -80.0f && t < 150.0f) {
+    HeatPipeTempC = t;
+  } // else keep previous HeatPipeTempC (may be NAN), which prints "--.-"
 
   // Battery snapshot (unchanged math)
   float vbatt = readPackVoltage();
@@ -507,7 +529,11 @@ void setup() {
   // DS18B20
   HeatPipeTemp.begin();
   HeatPipeTemp.setResolution(9); // fastest conversion
+  ds18b20Present = (HeatPipeTemp.getDeviceCount() > 0);
   Serial.println(F("DS18B20 ready."));
+  if (!ds18b20Present) {
+    Serial.println(F("[DS18B20] not detected on D5 (check wiring & 4.7k pull-up)"));
+  }
 
   // Matter
   Matter.begin();
