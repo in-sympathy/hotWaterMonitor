@@ -112,7 +112,7 @@ const uint8_t BAT_ADC_PIN = A0;  // A0 for battery divider
 #endif
 
 // -------------------- Power/Reporting Config --------------------
-const float    TEMP_THRESHOLD_C          = 26.0f;                 // per your request
+const float    TEMP_THRESHOLD_C          = 22.0f;                 // trigger temperature for the LED and automation behavior 
 const uint32_t MEASUREMENT_INTERVAL_MS   = 3UL * 60UL * 1000UL;   // every 3 minutes
 const uint32_t INDICATE_DURATION_MS      = 5000;                  // show LEDs for 5 s after each measurement
 const float    DELTA_REPORT_C            = 0.2f;                  // publish if Δ ≥ 0.2°C
